@@ -5841,6 +5841,9 @@ class TeamCreateRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=1000, description="Team description")
     visibility: Literal["private", "public"] = Field("private", description="Team visibility level")
     max_members: Optional[int] = Field(default=None, description="Maximum number of team members")
+    oidc_sync_enabled: bool = Field(False, description="Enable automatic member sync from an OIDC group")
+    oidc_group_id: Optional[str] = Field(None, max_length=255, description="OIDC group ID to sync members from (e.g. Entra group UUID)")
+    oidc_sync_role: Literal["owner", "member"] = Field("member", description="Role assigned to members synced via OIDC group")
 
     @field_validator("name")
     @classmethod
@@ -5936,6 +5939,9 @@ class TeamUpdateRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=1000, description="Team description")
     visibility: Optional[Literal["private", "public"]] = Field(None, description="Team visibility level")
     max_members: Optional[int] = Field(default=None, description="Maximum number of team members")
+    oidc_sync_enabled: Optional[bool] = Field(None, description="Enable automatic member sync from an OIDC group")
+    oidc_group_id: Optional[str] = Field(None, max_length=255, description="OIDC group ID to sync members from (e.g. Entra group UUID)")
+    oidc_sync_role: Optional[Literal["owner", "member"]] = Field(None, description="Role assigned to members synced via OIDC group")
 
     @field_validator("name")
     @classmethod
@@ -6029,6 +6035,9 @@ class TeamResponse(BaseModel):
     is_personal: bool = Field(..., description="Whether this is a personal team")
     visibility: Optional[str] = Field(..., description="Team visibility level")
     max_members: Optional[int] = Field(None, description="Maximum number of members allowed")
+    oidc_sync_enabled: bool = Field(False, description="Whether OIDC group sync is enabled")
+    oidc_group_id: Optional[str] = Field(None, description="OIDC group ID linked to this team")
+    oidc_sync_role: str = Field("member", description="Role assigned to OIDC-synced members")
     member_count: int = Field(..., description="Current number of team members")
     created_at: datetime = Field(..., description="Team creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")

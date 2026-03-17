@@ -987,6 +987,21 @@ class MetaServerService:
         from mcpgateway.db import Gateway
         from mcpgateway.services.token_storage_service import TokenStorageService
 
+        # Resolve user_email: prefer explicit param, fall back to JWT in request_headers
+        effective_email = user_email
+        if not effective_email and request_headers:
+            auth_header = request_headers.get("authorization", "")
+            if auth_header.startswith("Bearer "):
+                try:
+                    import jwt as pyjwt  # pylint: disable=import-outside-toplevel
+                    token = auth_header[7:]
+                    payload = pyjwt.decode(token, options={"verify_signature": False})
+                    effective_email = payload.get("email") or payload.get("sub")
+                    if effective_email:
+                        effective_email = effective_email.strip().lower()
+                except Exception:
+                    pass
+
         gateway_name = arguments.get("gateway_name", "")
         if not gateway_name:
             return AuthorizeGatewayResponse(
@@ -1029,9 +1044,9 @@ class MetaServerService:
                     ).model_dump(by_alias=True)
 
                 # Check if user already has a valid token
-                if user_email:
+                if effective_email:
                     token_service = TokenStorageService(db)
-                    token_info = await token_service.get_token_info(gateway_id, user_email)
+                    token_info = await token_service.get_token_info(gateway_id, effective_email)
                     if token_info and not token_info.get("is_expired", True):
                         return AuthorizeGatewayResponse(
                             gateway_id=gateway_id,
@@ -1042,9 +1057,10 @@ class MetaServerService:
 
                 # Build the authorize URL
                 settings = get_settings()
-                app_domain = settings.app_domain or ""
-                root_path = settings.app_root_path or ""
-                authorize_url = f"{app_domain}{root_path}/oauth/authorize/{gateway_id}"
+                app_domain = (settings.app_domain or "").rstrip("/")
+                root_path = (settings.app_root_path or "").strip("/")
+                base = f"{app_domain}/{root_path}" if root_path else app_domain
+                authorize_url = f"{base}/oauth/authorize/{gateway_id}"
 
                 return AuthorizeGatewayResponse(
                     gateway_id=gateway_id,

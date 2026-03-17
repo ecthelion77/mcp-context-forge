@@ -23,7 +23,7 @@ Examples:
     >>> service = MetaServerService()
     >>> tools = service.get_meta_tool_definitions()
     >>> len(tools)
-    6
+    7
     >>> tools[0]["name"]
     'search_tools'
 """
@@ -40,6 +40,7 @@ from sqlalchemy import or_
 # First-Party
 from mcpgateway.db import get_db, Tool, ToolEmbedding
 from mcpgateway.meta_server.schemas import (
+    AuthorizeGatewayResponse,
     DescribeToolResponse,
     ExecuteToolResponse,
     GetSimilarToolsResponse,
@@ -202,6 +203,7 @@ class MetaServerService:
             "execute_tool": self._stub_execute_tool,
             "get_tool_categories": self._get_tool_categories,
             "get_similar_tools": self._get_similar_tools,
+            "authorize_gateway": self._authorize_gateway,
         }
 
         handler = handlers.get(tool_name)
@@ -959,6 +961,112 @@ class MetaServerService:
             return GetToolCategoriesResponse(
                 categories=[],
                 total_categories=0,
+            ).model_dump(by_alias=True)
+
+    async def _authorize_gateway(
+        self,
+        arguments: Dict[str, Any],
+        user_email: Optional[str] = None,
+        token_teams: Optional[List[str]] = None,
+        request_headers: Optional[Dict[str, str]] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Check OAuth authorization status for a gateway and return an authorize URL if needed.
+
+        Args:
+            arguments: Must contain gateway_name (name or ID of the gateway).
+            user_email: Email of the authenticated user.
+            token_teams: Team IDs from JWT token.
+            request_headers: Headers from the original request.
+
+        Returns:
+            AuthorizeGatewayResponse as dict with status and optional authorize_url.
+        """
+        # First-Party
+        from mcpgateway.config import get_settings
+        from mcpgateway.db import Gateway
+        from mcpgateway.services.token_storage_service import TokenStorageService
+
+        gateway_name = arguments.get("gateway_name", "")
+        if not gateway_name:
+            return AuthorizeGatewayResponse(
+                gateway_id="",
+                gateway_name="",
+                status="error",
+                message="gateway_name is required",
+            ).model_dump(by_alias=True)
+
+        try:
+            db_gen = get_db()
+            db = next(db_gen)
+            try:
+                from sqlalchemy import or_, select  # pylint: disable=import-outside-toplevel
+
+                # Find gateway by name or ID
+                gateway = db.execute(
+                    select(Gateway).where(
+                        or_(Gateway.name == gateway_name, Gateway.id == gateway_name)
+                    )
+                ).scalar_one_or_none()
+
+                if not gateway:
+                    return AuthorizeGatewayResponse(
+                        gateway_id="",
+                        gateway_name=gateway_name,
+                        status="not_found",
+                        message=f"Gateway '{gateway_name}' not found",
+                    ).model_dump(by_alias=True)
+
+                gateway_id = gateway.id
+
+                # Check if gateway has OAuth config
+                if not gateway.oauth_config:
+                    return AuthorizeGatewayResponse(
+                        gateway_id=gateway_id,
+                        gateway_name=gateway.name,
+                        status="authorized",
+                        message="Gateway does not require OAuth authorization",
+                    ).model_dump(by_alias=True)
+
+                # Check if user already has a valid token
+                if user_email:
+                    token_service = TokenStorageService(db)
+                    token_info = await token_service.get_token_info(gateway_id, user_email)
+                    if token_info and not token_info.get("is_expired", True):
+                        return AuthorizeGatewayResponse(
+                            gateway_id=gateway_id,
+                            gateway_name=gateway.name,
+                            status="authorized",
+                            message=f"You already have a valid OAuth token for '{gateway.name}' (expires {token_info.get('expires_at', 'unknown')})",
+                        ).model_dump(by_alias=True)
+
+                # Build the authorize URL
+                settings = get_settings()
+                app_domain = settings.app_domain or ""
+                root_path = settings.app_root_path or ""
+                authorize_url = f"{app_domain}{root_path}/oauth/authorize/{gateway_id}"
+
+                return AuthorizeGatewayResponse(
+                    gateway_id=gateway_id,
+                    gateway_name=gateway.name,
+                    status="authorization_required",
+                    authorize_url=authorize_url,
+                    message=f"OAuth authorization required for '{gateway.name}'. Open the following URL in your browser to authorize: {authorize_url}",
+                ).model_dump(by_alias=True)
+
+            finally:
+                try:
+                    next(db_gen)
+                except StopIteration:
+                    pass
+
+        except Exception as e:
+            logger.error(f"Error in authorize_gateway: {e}")
+            return AuthorizeGatewayResponse(
+                gateway_id="",
+                gateway_name=gateway_name,
+                status="error",
+                message=f"Error checking gateway authorization: {str(e)}",
             ).model_dump(by_alias=True)
 
 

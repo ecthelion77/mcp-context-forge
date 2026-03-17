@@ -184,6 +184,7 @@ class MetaToolService:
                 name=tool_name,
                 arguments=arguments,
                 request_headers=request_headers,
+                app_user_email=user_email,
                 user_email=user_email,
                 token_teams=token_teams,
                 meta_data=meta_data,

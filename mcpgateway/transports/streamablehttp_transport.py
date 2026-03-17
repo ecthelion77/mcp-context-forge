@@ -1182,7 +1182,12 @@ async def call_tool(name: str, arguments: dict) -> Union[
     meta_service = get_meta_server_service()
     if meta_service.is_meta_server(current_server_type) and meta_service.is_meta_tool(name):
         # Dispatch to meta-tool stub handler
-        result_data = await meta_service.handle_meta_tool_call(name, arguments)
+        result_data = await meta_service.handle_meta_tool_call(
+            name, arguments,
+            user_email=user_email,
+            token_teams=token_teams,
+            request_headers=request_headers,
+        )
         return [types.TextContent(type="text", text=str(result_data))]
 
     # Check if we're in direct_proxy mode by looking for X-Context-Forge-Gateway-Id header

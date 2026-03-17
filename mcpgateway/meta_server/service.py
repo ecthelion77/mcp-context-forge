@@ -157,7 +157,14 @@ class MetaServerService:
         """
         return tool_name in META_TOOL_DEFINITIONS
 
-    async def handle_meta_tool_call(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def handle_meta_tool_call(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        user_email: Optional[str] = None,
+        token_teams: Optional[List[str]] = None,
+        request_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """Dispatch a meta-tool call to the appropriate stub handler.
 
         This is the main entry point for meta-tool invocations. Each meta-tool
@@ -171,6 +178,9 @@ class MetaServerService:
         Args:
             tool_name: Name of the meta-tool to invoke.
             arguments: Arguments for the tool call (may use camelCase or snake_case keys).
+            user_email: Email of the authenticated user (for OAuth token retrieval).
+            token_teams: Team IDs from JWT token.
+            request_headers: Headers from the original request.
 
         Returns:
             Dict containing the stub response.
@@ -204,7 +214,12 @@ class MetaServerService:
         normalized_args = self._normalize_arguments(arguments)
 
         logger.info(f"Handling meta-tool call: {tool_name}")
-        return await handler(normalized_args)
+        return await handler(
+            normalized_args,
+            user_email=user_email,
+            token_teams=token_teams,
+            request_headers=request_headers,
+        )
 
     @staticmethod
     def _normalize_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -237,7 +252,7 @@ class MetaServerService:
     # Implemented handlers
     # ------------------------------------------------------------------
 
-    async def _search_tools(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def _search_tools(self, arguments: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         """Search for tools using hybrid semantic + keyword search with scope filtering.
 
         Performs a hybrid search:
@@ -360,7 +375,7 @@ class MetaServerService:
             has_more=has_more,
         ).model_dump(by_alias=True)
 
-    async def _get_similar_tools(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def _get_similar_tools(self, arguments: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         """Find tools similar to a given reference tool using vector similarity.
 
         Performs a "more like this" search:
@@ -674,7 +689,7 @@ class MetaServerService:
     # Implemented handlers
     # ------------------------------------------------------------------
 
-    async def _list_tools(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def _list_tools(self, arguments: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         """List tools with pagination, sorting, and scope filtering.
 
         Performs paginated tool listing:
@@ -795,7 +810,7 @@ class MetaServerService:
     # Business logic will be implemented by other teams.
     # ------------------------------------------------------------------
 
-    async def _stub_describe_tool(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def _stub_describe_tool(self, arguments: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         """Delegate to MetaToolService for describe_tool implementation.
 
         Args:
@@ -831,11 +846,20 @@ class MetaServerService:
                 description=f"Error describing tool {tool_name}: {str(e)}",
             ).model_dump(by_alias=True)
 
-    async def _stub_execute_tool(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def _stub_execute_tool(
+        self,
+        arguments: Dict[str, Any],
+        user_email: Optional[str] = None,
+        token_teams: Optional[List[str]] = None,
+        request_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """Delegate to MetaToolService for execute_tool implementation.
 
         Args:
             arguments: Execution parameters.
+            user_email: Email of the authenticated user (for OAuth token retrieval).
+            token_teams: Team IDs from JWT token.
+            request_headers: Headers from the original request.
 
         Returns:
             ExecuteToolResponse as dict from MetaToolService.
@@ -852,6 +876,9 @@ class MetaServerService:
                     tool_name=arguments.get("tool_name", ""),
                     arguments=arguments.get("arguments", {}),
                     scope=arguments.get("scope"),
+                    user_email=user_email,
+                    token_teams=token_teams,
+                    request_headers=request_headers,
                 )
                 return result.model_dump(by_alias=True)
             finally:
@@ -869,7 +896,7 @@ class MetaServerService:
                 error=f"Error executing tool {tool_name}: {str(e)}",
             ).model_dump(by_alias=True)
 
-    async def _get_tool_categories(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def _get_tool_categories(self, arguments: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         """Get aggregated tool categories with counts from ToolService.
 
         Args:

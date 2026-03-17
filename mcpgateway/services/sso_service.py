@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 # First-Party
 from mcpgateway.common.validators import SecurityValidator
 from mcpgateway.config import settings
-from mcpgateway.db import PendingUserApproval, SSOAuthSession, SSOProvider, utc_now
+from mcpgateway.db import EmailTeam, PendingUserApproval, SSOAuthSession, SSOProvider, utc_now
 from mcpgateway.services.email_auth_service import EmailAuthService
 from mcpgateway.services.encryption_service import get_encryption_service
 from mcpgateway.utils.create_jwt_token import create_jwt_token
@@ -528,7 +528,7 @@ class SSOService:
         return None, "member"
 
     async def _apply_team_mapping(self, user_email: str, user_info: Dict[str, Any], provider: Optional[SSOProvider]) -> None:
-        """Apply provider team mappings based on SSO group claims.
+        """Apply provider team mappings and team-side OIDC group sync based on SSO group claims.
 
         Args:
             user_email: Authenticated user email to map into teams.
@@ -539,10 +539,6 @@ class SSOService:
             None.
         """
         if not provider:
-            return
-
-        mapping = getattr(provider, "team_mapping", None)
-        if not isinstance(mapping, dict) or not mapping:
             return
 
         groups_raw = user_info.get("groups", [])
@@ -562,26 +558,54 @@ class SSOService:
         from mcpgateway.services.team_management_service import MemberAlreadyExistsError, TeamManagementError, TeamManagementService  # pylint: disable=import-outside-toplevel
 
         team_service = TeamManagementService(self.db)
-        for source_group, target in mapping.items():
-            if not isinstance(source_group, str):
-                continue
-            source_group_normalized = source_group.strip().lower()
-            if not source_group_normalized or source_group_normalized not in normalized_groups:
-                continue
 
-            team_id, role = self._resolve_team_mapping_target(target)
-            if not team_id:
-                logger.warning("Skipping invalid SSO team_mapping entry for provider %s and group '%s'", provider.id, source_group)
-                continue
+        # 1) Provider-side team mapping (explicit mapping dict on the SSO provider)
+        mapping = getattr(provider, "team_mapping", None)
+        if isinstance(mapping, dict) and mapping:
+            for source_group, target in mapping.items():
+                if not isinstance(source_group, str):
+                    continue
+                source_group_normalized = source_group.strip().lower()
+                if not source_group_normalized or source_group_normalized not in normalized_groups:
+                    continue
 
+                team_id, role = self._resolve_team_mapping_target(target)
+                if not team_id:
+                    logger.warning("Skipping invalid SSO team_mapping entry for provider %s and group '%s'", provider.id, source_group)
+                    continue
+
+                try:
+                    await team_service.add_member_to_team(team_id=team_id, user_email=user_email, role=role, invited_by=user_email)
+                except MemberAlreadyExistsError:
+                    logger.debug("SSO team_mapping: user %s already member of team %s", user_email, team_id)
+                except TeamManagementError as exc:
+                    logger.warning("SSO team_mapping failed for user %s, group '%s', team '%s': %s", user_email, source_group, team_id, exc)
+                except Exception as exc:
+                    logger.warning("Unexpected SSO team_mapping error for user %s and team '%s': %s", user_email, team_id, exc)
+
+        # 2) Team-side OIDC group sync (teams with oidc_sync_enabled and a matching oidc_group_id)
+        try:
+            oidc_teams = self.db.query(EmailTeam).filter(
+                EmailTeam.oidc_sync_enabled.is_(True),
+                EmailTeam.oidc_group_id.isnot(None),
+                EmailTeam.is_active.is_(True),
+            ).all()
+        except Exception as exc:
+            logger.warning("Failed to query OIDC-synced teams: %s", exc)
+            oidc_teams = []
+
+        for team in oidc_teams:
+            if team.oidc_group_id.strip().lower() not in normalized_groups:
+                continue
+            role = team.oidc_sync_role or "member"
             try:
-                await team_service.add_member_to_team(team_id=team_id, user_email=user_email, role=role, invited_by=user_email)
+                await team_service.add_member_to_team(team_id=str(team.id), user_email=user_email, role=role, invited_by=user_email)
             except MemberAlreadyExistsError:
-                logger.debug("SSO team_mapping: user %s already member of team %s", user_email, team_id)
+                logger.debug("OIDC team sync: user %s already member of team %s", user_email, team.id)
             except TeamManagementError as exc:
-                logger.warning("SSO team_mapping failed for user %s, group '%s', team '%s': %s", user_email, source_group, team_id, exc)
+                logger.warning("OIDC team sync failed for user %s, team '%s': %s", user_email, team.id, exc)
             except Exception as exc:
-                logger.warning("Unexpected SSO team_mapping error for user %s and team '%s': %s", user_email, team_id, exc)
+                logger.warning("Unexpected OIDC team sync error for user %s and team '%s': %s", user_email, team.id, exc)
 
     async def create_provider(self, provider_data: Dict[str, Any]) -> SSOProvider:
         """Create new SSO provider configuration.

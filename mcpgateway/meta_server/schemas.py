@@ -528,6 +528,44 @@ class GetSimilarToolsResponse(BaseModelWithConfigDict):
     total_found: int = Field(0, ge=0, description="Total number of similar tools found")
 
 
+class AuthorizeGatewayRequest(BaseModelWithConfigDict):
+    """Request schema for the authorize_gateway meta-tool.
+
+    Attributes:
+        gateway_name: Name or ID of the gateway to authorize.
+
+    Examples:
+        >>> req = AuthorizeGatewayRequest(gateway_name="github-enterprise")
+        >>> req.gateway_name
+        'github-enterprise'
+    """
+
+    gateway_name: str = Field(..., description="Name or ID of the gateway to authorize")
+
+
+class AuthorizeGatewayResponse(BaseModelWithConfigDict):
+    """Response schema for the authorize_gateway meta-tool.
+
+    Attributes:
+        gateway_id: ID of the gateway.
+        gateway_name: Name of the gateway.
+        status: Authorization status (authorized, authorization_required, not_found, error).
+        authorize_url: URL to open in browser if authorization is required.
+        message: Human-readable status message.
+
+    Examples:
+        >>> resp = AuthorizeGatewayResponse(gateway_id="abc", gateway_name="gh", status="authorized", message="ok")
+        >>> resp.status
+        'authorized'
+    """
+
+    gateway_id: str = Field(..., description="ID of the gateway")
+    gateway_name: str = Field(..., description="Name of the gateway")
+    status: str = Field(..., description="Authorization status: authorized, authorization_required, not_found, error")
+    authorize_url: Optional[str] = Field(None, description="URL to open in browser for OAuth authorization")
+    message: str = Field(..., description="Human-readable status message")
+
+
 # Meta-Tool Definition Constants
 
 #: Registry of meta-tool names and their input schemas.
@@ -556,5 +594,9 @@ META_TOOL_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "get_similar_tools": {
         "description": "Find tools that are similar to a given tool based on description and schema similarity.",
         "input_schema": GetSimilarToolsRequest.model_json_schema(),
+    },
+    "authorize_gateway": {
+        "description": "Check OAuth authorization status for a gateway and provide an authorization URL if needed. Use this when a tool call fails with 'User authentication required for OAuth-protected gateway'.",
+        "input_schema": AuthorizeGatewayRequest.model_json_schema(),
     },
 }

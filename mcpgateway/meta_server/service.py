@@ -1057,8 +1057,8 @@ class MetaServerService:
 
                 # Build the authorize URL
                 settings = get_settings()
-                app_domain = (settings.app_domain or "").rstrip("/")
-                root_path = (settings.app_root_path or "").strip("/")
+                app_domain = str(settings.app_domain or "").rstrip("/")
+                root_path = str(settings.app_root_path or "").strip("/")
                 base = f"{app_domain}/{root_path}" if root_path else app_domain
                 authorize_url = f"{base}/oauth/authorize/{gateway_id}"
 

@@ -140,6 +140,7 @@ from mcpgateway.services.permission_service import PermissionService
 from mcpgateway.services.plugin_service import get_plugin_service
 from mcpgateway.services.prompt_service import PromptArgumentsJSONError, PromptNameConflictError, PromptNotFoundError, PromptService
 from mcpgateway.services.resource_service import ResourceNotFoundError, ResourceService, ResourceURIConflictError
+from mcpgateway.services.role_service import RoleService
 from mcpgateway.services.root_service import RootService, RootServiceError, RootServiceNotFoundError
 from mcpgateway.services.server_service import ServerError, ServerLockConflictError, ServerNameConflictError, ServerNotFoundError, ServerService
 from mcpgateway.services.structured_logger import get_structured_logger
@@ -2723,11 +2724,6 @@ async def admin_edit_server(
         visibility = str(form.get("visibility", "private"))
         user_email = get_user_email(user)
 
-        # NOTE: Do NOT read team_id from the form — the frontend team selector
-        # may point to a different team than the entity's actual owner.  The
-        # service layer preserves the existing team_id and performs its own
-        # ownership check via check_resource_ownership.
-
         mod_metadata = MetadataCapture.extract_modification_metadata(request, user, 0)
 
         # Handle "Select All" for tools, resources, and prompts.
@@ -2777,6 +2773,13 @@ async def admin_edit_server(
                 oauth_enabled = False
                 oauth_config = None
 
+        # Read and validate team_id from form
+        team_id_raw = form.get("team_id", None)
+        team_id = str(team_id_raw).strip() if team_id_raw else None
+        if team_id:
+            team_service = TeamManagementService(db)
+            team_id = await team_service.verify_team_for_user(user_email, team_id)
+
         server = ServerUpdate(
             id=form.get("id"),
             name=form.get("name"),
@@ -2787,7 +2790,7 @@ async def admin_edit_server(
             associated_prompts=",".join(str(x) for x in associated_prompts_list),
             tags=tags,
             visibility=visibility,
-            team_id=None,  # Preserve existing team — never override from form
+            team_id=team_id,
             owner_email=user_email,
             oauth_enabled=oauth_enabled,
             oauth_config=oauth_config,
@@ -7402,6 +7405,20 @@ async def admin_get_user_edit(
         current_user_email = get_user_email(_user)
         is_editing_self = current_user_email.lower() == decoded_email.lower()
 
+        # Fetch global roles and user's current global role for the role dropdown
+        role_service = RoleService(db)
+        permission_service = PermissionService(db)
+        global_roles = await role_service.list_roles(scope="global")
+        user_global_roles = await permission_service.get_user_roles(decoded_email, scope="global")
+        current_global_role_name = user_global_roles[0].role.name if user_global_roles else ""
+
+        # Build role dropdown options
+        role_options_html = ""
+        for role in sorted(global_roles, key=lambda r: r.name):
+            selected = "selected" if role.name == current_global_role_name else ""
+            display_name = role.name.replace("_", " ").title()
+            role_options_html += f'<option value="{html.escape(role.name)}" {selected}>{html.escape(display_name)}</option>'
+
         # Build Password Requirements HTML separately to avoid backslash issues inside f-strings
         if settings.password_require_uppercase or settings.password_require_lowercase or settings.password_require_numbers or settings.password_require_special:
             pr_lines = []
@@ -7476,10 +7493,11 @@ async def admin_get_user_edit(
                            class="mt-1 px-1.5 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 text-gray-900 dark:text-white">
                 </div>
                 {"" if is_editing_self else f'''<div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                        <input type="checkbox" name="is_admin" {"checked" if user_obj.is_admin else ""}
-                               class="mr-2"> Administrator
-                    </label>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Global Role</label>
+                    <select name="global_role"
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 text-gray-900 dark:text-white">
+                        {role_options_html}
+                    </select>
                 </div>'''}
                 <div>
                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -7562,7 +7580,7 @@ async def admin_update_user(
 
         form = await request.form()
         full_name = form.get("full_name")
-        is_admin = form.get("is_admin") == "on"
+        global_role_name = form.get("global_role")
         email_verified = form.get("email_verified") == "on"
         password = form.get("password")
         confirm_password = form.get("confirm_password")
@@ -7576,10 +7594,15 @@ async def admin_update_user(
 
         # Check if trying to remove admin privileges from last admin
         user_obj = await auth_service.get_user_by_email(decoded_email)
+        is_editing_self = user_obj and current_user_email.lower() == decoded_email.lower()
 
-        # When editing self, preserve current admin status (checkbox is hidden in UI)
-        if user_obj and current_user_email.lower() == decoded_email.lower():
+        # Derive is_admin from selected global role
+        # When editing self, role dropdown is hidden — preserve current admin status
+        if is_editing_self:
             is_admin = user_obj.is_admin
+            global_role_name = None  # Skip role change for self-edit
+        else:
+            is_admin = global_role_name == "platform_admin" if global_role_name else user_obj.is_admin if user_obj else False
 
         if user_obj and user_obj.is_admin and not is_admin:
             # This user is currently an admin and we're trying to remove admin privileges
@@ -7601,6 +7624,25 @@ async def admin_update_user(
                 return HTMLResponse(content=f'<div class="text-red-500">Password validation failed: {error_msg}</div>', status_code=400, headers={"HX-Retarget": "#edit-user-error"})
 
         await auth_service.update_user(email=decoded_email, full_name=full_name, is_admin=is_admin, email_verified=email_verified, password=password, admin_origin_source="ui")
+
+        # Explicitly assign the selected global role (handles 3-way: admin/user/viewer)
+        if global_role_name:
+            role_service = RoleService(db)
+            permission_service = PermissionService(db)
+
+            # Find the target role
+            target_role = await role_service.get_role_by_name(global_role_name, "global")
+            if target_role:
+                # Revoke all current global roles that don't match the target
+                current_global_roles = await permission_service.get_user_roles(decoded_email, scope="global")
+                for ur in current_global_roles:
+                    if ur.role_id != target_role.id:
+                        await role_service.revoke_role_from_user(user_email=decoded_email, role_id=ur.role_id, scope="global", scope_id=None)
+
+                # Assign the target role if not already assigned
+                existing = await role_service.get_user_role_assignment(user_email=decoded_email, role_id=target_role.id, scope="global", scope_id=None)
+                if not existing or not existing.is_active:
+                    await role_service.assign_role_to_user(user_email=decoded_email, role_id=target_role.id, scope="global", scope_id=None, granted_by=current_user_email)
 
         # Return success message with auto-close and refresh
         success_html = """
@@ -11178,10 +11220,6 @@ async def admin_edit_tool(
     visibility = str(form.get("visibility", "private"))
 
     user_email = get_user_email(user)
-    # NOTE: Do NOT read team_id from the form — the frontend team selector
-    # may point to a different team than the entity's actual owner.  The
-    # service layer preserves the existing team_id and performs its own
-    # ownership check via check_resource_ownership.
 
     headers_raw2 = form.get("headers")
     input_schema_raw2 = form.get("input_schema")
@@ -11216,7 +11254,7 @@ async def admin_edit_tool(
         "tags": tags,
         "visibility": visibility,
         "owner_email": user_email,
-        "team_id": None,  # Preserve existing team — never override from form
+        "team_id": None,  # Set below after validation
     }
     # Only include integration_type if it's provided (not disabled in form)
     if "integrationType" in form:
@@ -11224,6 +11262,15 @@ async def admin_edit_tool(
     # Only include request_type if it's provided (not disabled in form)
     if "requestType" in form:
         tool_data["request_type"] = form.get("requestType")
+
+    # Read and validate team_id from form
+    team_id_raw = form.get("team_id", None)
+    team_id = str(team_id_raw).strip() if team_id_raw else None
+    if team_id:
+        team_service = TeamManagementService(db)
+        team_id = await team_service.verify_team_for_user(user_email, team_id)
+        tool_data["team_id"] = team_id
+
     LOGGER.debug(f"Tool update data built: {tool_data}")
     try:
         tool = ToolUpdate(**tool_data)  # Pydantic validation happens here
@@ -11796,16 +11843,19 @@ async def admin_edit_gateway(
                 LOGGER.info(f"✅ Assembled OAuth config from UI form fields (edit): grant_type={oauth_grant_type}, issuer={oauth_issuer}")
 
         user_email = get_user_email(user)
-        # NOTE: Do NOT read team_id from the form — the frontend team selector
-        # may point to a different team than the entity's actual owner.  The
-        # service layer preserves the existing team_id and performs its own
-        # ownership check via check_resource_ownership.
 
         # Auto-detect OAuth: if oauth_config is present and auth_type not explicitly set, use "oauth"
         auth_type_from_form = str(form.get("auth_type", ""))
         if oauth_config and not auth_type_from_form:
             auth_type_from_form = "oauth"
             LOGGER.info("Auto-detected OAuth configuration in edit, setting auth_type='oauth'")
+
+        # Read and validate team_id from form
+        team_id_raw = form.get("team_id", None)
+        team_id = str(team_id_raw).strip() if team_id_raw else None
+        if team_id:
+            team_service = TeamManagementService(db)
+            team_id = await team_service.verify_team_for_user(user_email, team_id)
 
         gateway = GatewayUpdate(  # Pydantic validation happens here
             name=str(form.get("name")),
@@ -11828,7 +11878,7 @@ async def admin_edit_gateway(
             oauth_config=oauth_config,
             visibility=visibility,
             owner_email=user_email,
-            team_id=None,  # Preserve existing team — never override from form
+            team_id=team_id,
         )
 
         mod_metadata = MetadataCapture.extract_modification_metadata(request, user, 0)
@@ -12155,10 +12205,15 @@ async def admin_edit_resource(
     form = await request.form()
     LOGGER.info(f"Form data received for resource edit: {form}")
     visibility = str(form.get("visibility", "private"))
-    # NOTE: Do NOT read team_id from the form — the frontend team selector
-    # may point to a different team than the entity's actual owner.  The
-    # service layer preserves the existing team_id and performs its own
-    # ownership check via check_resource_ownership.
+    user_email = get_user_email(user)
+
+    # Read and validate team_id from form
+    team_id_raw = form.get("team_id", None)
+    team_id = str(team_id_raw).strip() if team_id_raw else None
+    if team_id:
+        team_service = TeamManagementService(db)
+        team_id = await team_service.verify_team_for_user(user_email, team_id)
+
     # Parse tags from comma-separated string
     tags_str = str(form.get("tags", ""))
     tags: List[str] = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
@@ -12174,6 +12229,8 @@ async def admin_edit_resource(
             template=str(form.get("template")),
             tags=tags,
             visibility=visibility,
+            team_id=team_id,
+            owner_email=user_email,
         )
         LOGGER.info(f"ResourceUpdate object created: {resource}")
         await resource_service.update_resource(
@@ -12484,10 +12541,13 @@ async def admin_edit_prompt(
 
     visibility = str(form.get("visibility", "private"))
     user_email = get_user_email(user)
-    # NOTE: Do NOT read team_id from the form — the frontend team selector
-    # may point to a different team than the entity's actual owner.  The
-    # service layer preserves the existing team_id and performs its own
-    # ownership check via check_resource_ownership.
+
+    # Read and validate team_id from form
+    team_id_raw = form.get("team_id", None)
+    team_id = str(team_id_raw).strip() if team_id_raw else None
+    if team_id:
+        team_service = TeamManagementService(db)
+        team_id = await team_service.verify_team_for_user(user_email, team_id)
 
     # Parse tags from comma-separated string
     tags_str = str(form.get("tags", ""))
@@ -12505,7 +12565,7 @@ async def admin_edit_prompt(
             arguments=arguments,
             tags=tags,
             visibility=visibility,
-            team_id=None,  # Preserve existing team — never override from form
+            team_id=team_id,
             owner_email=user_email,
         )
         await prompt_service.update_prompt(
@@ -14985,10 +15045,13 @@ async def admin_edit_a2a_agent(
                 LOGGER.info(f"✅ Assembled OAuth config from UI form fields (edit): grant_type={oauth_grant_type}, issuer={oauth_issuer}")
 
         user_email = get_user_email(user)
-        # NOTE: Do NOT read team_id from the form — the frontend team selector
-        # may point to a different team than the entity's actual owner.  The
-        # service layer preserves the existing team_id and performs its own
-        # ownership check via check_resource_ownership.
+
+        # Read and validate team_id from form
+        team_id_raw = form.get("team_id", None)
+        team_id = str(team_id_raw).strip() if team_id_raw else None
+        if team_id:
+            team_service = TeamManagementService(db)
+            team_id = await team_service.verify_team_for_user(user_email, team_id)
 
         # Auto-detect OAuth: if oauth_config is present and auth_type not explicitly set, use "oauth"
         auth_type_from_form = str(form.get("auth_type", ""))
@@ -15015,7 +15078,7 @@ async def admin_edit_a2a_agent(
             passthrough_headers=passthrough_headers,
             oauth_config=oauth_config,
             visibility=visibility,
-            team_id=None,  # Preserve existing team — never override from form
+            team_id=team_id,
             owner_email=user_email,
             capabilities=capabilities,  # Optional, not editable via UI
             config=config,  # Optional, not editable via UI

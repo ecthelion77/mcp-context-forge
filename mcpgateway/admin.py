@@ -5269,7 +5269,7 @@ async def admin_create_team(
         oidc_sync_enabled = form.get("oidc_sync_enabled") == "on"
         oidc_group_id = str(form.get("oidc_group_id", "")).strip() or None
         oidc_sync_role = form.get("oidc_sync_role", "member")
-        if oidc_sync_role not in ("owner", "member"):
+        if oidc_sync_role not in ("owner", "developer", "member"):
             oidc_sync_role = "member"
 
         if not name:
@@ -5729,7 +5729,8 @@ async def admin_get_team_edit(
                             <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Default Role for Synced Members</label>
                             <select name="oidc_sync_role"
                                     class="mt-1 px-1.5 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 text-gray-900 dark:text-white">
-                                <option value="member" {"selected" if getattr(team, "oidc_sync_role", "member") == "member" else ""}>Member</option>
+                                <option value="member" {"selected" if getattr(team, "oidc_sync_role", "member") == "member" else ""}>Viewer</option>
+                                <option value="developer" {"selected" if getattr(team, "oidc_sync_role", "member") == "developer" else ""}>Developer</option>
                                 <option value="owner" {"selected" if getattr(team, "oidc_sync_role", "member") == "owner" else ""}>Owner</option>
                             </select>
                         </div>
@@ -5801,7 +5802,7 @@ async def admin_update_team(
         oidc_group_id = form.get("oidc_group_id")
         oidc_group_id = oidc_group_id.strip() if isinstance(oidc_group_id, str) else None
         oidc_sync_role = form.get("oidc_sync_role", "member")
-        if oidc_sync_role not in ("owner", "member"):
+        if oidc_sync_role not in ("owner", "developer", "member"):
             oidc_sync_role = "member"
 
         if not name:

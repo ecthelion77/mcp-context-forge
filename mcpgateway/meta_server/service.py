@@ -215,10 +215,27 @@ class MetaServerService:
         # (e.g. "tool_name"). Accept both conventions by normalizing before dispatch.
         normalized_args = self._normalize_arguments(arguments)
 
+        # Resolve user_email: prefer explicit param, fall back to JWT in request_headers.
+        # The admin bypass in streamablehttp_transport sets user_email=None for
+        # unrestricted admin access, but OAuth token lookup still needs the real email.
+        effective_email = user_email
+        if not effective_email and request_headers:
+            auth_header = request_headers.get("authorization", "")
+            if auth_header.startswith("Bearer "):
+                try:
+                    import jwt as pyjwt  # pylint: disable=import-outside-toplevel
+                    token = auth_header[7:]
+                    payload = pyjwt.decode(token, options={"verify_signature": False})
+                    effective_email = payload.get("email") or payload.get("sub")
+                    if effective_email:
+                        effective_email = effective_email.strip().lower()
+                except Exception:
+                    pass
+
         logger.info(f"Handling meta-tool call: {tool_name}")
         return await handler(
             normalized_args,
-            user_email=user_email,
+            user_email=effective_email,
             token_teams=token_teams,
             request_headers=request_headers,
         )
